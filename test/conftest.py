@@ -16,6 +16,7 @@ import pytest
 SRC = os.environ.get("SRC_DIR", "/src")
 PLUGIN_BUILD_DIR = os.environ.get("PLUGIN_BUILD_DIR", os.path.join(SRC, "build"))
 MODEL_DIR = os.path.join(SRC, "models", "sherpa-onnx-moonshine-tiny-en-int8")
+PIPER_MODEL = os.path.join(SRC, "models", "piper", "en_US-lessac-medium.onnx")
 EMITTER_HOST = "127.0.0.1"
 EMITTER_PORT = 17879
 
@@ -25,6 +26,16 @@ def model_available():
     if not os.path.isdir(MODEL_DIR):
         return False
     return all(os.path.exists(os.path.join(MODEL_DIR, n)) for n in needed)
+
+
+def piper_available():
+    if not os.path.exists(PIPER_MODEL):
+        return False
+    try:
+        import piper as _p  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def find_plugin_so():

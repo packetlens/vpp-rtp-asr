@@ -15,6 +15,11 @@ Three signals converged on this project:
   streaming TTFT, 26–245 MB on disk, CPU-viable, designed for the "many concurrent
   edge streams" shape that telephony traffic produces. Parakeet / Canary / Whisper
   remain optional backends for accuracy upsell and multilingual / offline paths.
+- **Piper neural TTS** is the right synthetic speech source for accuracy testing.
+  espeak-ng formant synthesis is acoustically incompatible with Moonshine's training
+  distribution ("the quick brown fox" → "the greek brown-fark jump" at ~55% word
+  accuracy). Piper en_US-lessac-medium produces near-natural waveforms that hit ~86%
+  word accuracy through the 8 kHz G.711 VPP pipeline — see Appendix B.
 
 Transcription-stack reasoning is summarized in Appendix A.
 
@@ -27,7 +32,7 @@ Transcription-stack reasoning is summarized in Appendix A.
 - Decodes G.711 µ-law/A-law, G.722, G.729, Opus, AMR-WB and FFmpeg-discoverable payloads
 - Resamples to 16 kHz f32 for ASR
 - Runs Voice Activity Detection (Silero via Sherpa-ONNX by default)
-- Streams audio into Sherpa-ONNX with a Moonshine v2 Base model (default) or configurable variant
+- Accumulates 16 kHz f32 PCM in per-session ring buffers, decodes chunks via Sherpa-ONNX offline recognizer (Moonshine-tiny-int8 default, Moonshine-base optional)
 - Emits transcripts via syslog, JSON-over-UDP, or gRPC
 
 v1 non-goals:
@@ -319,55 +324,77 @@ Alternate: WebRTC VAD (smaller, BSD-style), selectable via config.
 
 ## 7. ASR runtime
 
-### 7.1 Model — Moonshine v2 (default Base)
+### 7.1 Model — Moonshine (offline, int8 quantized)
 
-- Default: `moonshine-base.onnx` (58 MB).
-- Optional: `moonshine-small-streaming.onnx` (123 MB, better WER) or
-  `moonshine-medium-streaming.onnx` (245 MB, best WER).
-- Model files not committed to git. Download script `models/fetch.sh` pulls from
-  a checksum-verified mirror; plugin refuses to load on checksum mismatch.
+**Default: Moonshine-tiny-int8** (`sherpa-onnx-moonshine-tiny-en-int8/`, ~26 MB).
+Small, fast to load, adequate for integration tests and single-channel CPU
+inference. Confirmed: ~86% word accuracy on the pangram through 8 kHz G.711
+when paired with Piper neural TTS (see Appendix B for calibration method).
 
-### 7.2 Runtime — Sherpa-ONNX C API
+**Optional: Moonshine-base-int8** (`sherpa-onnx-moonshine-base-en-int8/`, ~58 MB).
+Better WER on clean English. Prefer for production multi-session deployments.
 
-Shared per Linux worker:
+Model file layout (`preprocess.onnx` is float; the rest use `.int8.onnx` in
+published tarballs, falling back to `.onnx` if the int8 variant is absent):
+
+```
+${model_dir}/preprocess.onnx
+${model_dir}/encode.int8.onnx          (or encode.onnx)
+${model_dir}/uncached_decode.int8.onnx (or uncached_decode.onnx)
+${model_dir}/cached_decode.int8.onnx   (or cached_decode.onnx)
+${model_dir}/tokens.txt
+```
+
+Model files are not committed to git. `models/fetch.sh` downloads them from
+the official k2-fsa/sherpa-onnx release mirrors.
+
+### 7.2 Runtime — Sherpa-ONNX offline C API (chunk-based)
+
+**Key constraint:** Sherpa-ONNX's online (streaming) recognizer does not expose
+Moonshine on the C API — only Transducer / Paraformer / Zipformer2-CTC variants
+are supported on the online path. Moonshine is available on the **offline** path
+only. We use a chunk-based offline loop: each Linux worker accumulates
+`segment_seconds` (default 2.0 s) of 16 kHz f32 PCM per session, then calls
+the offline recognizer once per chunk. Chunk boundaries are aligned to VAD
+silence edges when possible.
+
+Recognizer created once per Linux worker:
 
 ```c
-SherpaOnnxOnlineRecognizerConfig cfg = {
+SherpaOnnxOfflineRecognizerConfig cfg = {
   .model_config.moonshine = {
-    .preprocessor = "...", .encoder = "...",
-    .uncached_decoder = "...", .cached_decoder = "..."
+    .preprocessor = preprocess_path,
+    .encoder       = encode_path,
+    .uncached_decoder = uncached_decode_path,
+    .cached_decoder   = cached_decode_path,
   },
-  .sample_rate = 16000,
-  .feat_config = { .sample_rate = 16000, .feature_dim = 80 },
-  .decoding_method = "greedy_search",   /* or "modified_beam_search" at higher cost */
-  .enable_endpoint = 1,
-  .rule1_min_trailing_silence = 2.4f,
-  .rule2_min_trailing_silence = 1.2f,
-  .rule3_min_utterance_length = 20.0f,
+  .tokens = tokens_path,
+  .decoding_method = "greedy_search",
 };
-worker->recognizer = sherpa_onnx_create_online_recognizer(&cfg);
+worker->recognizer = SherpaOnnxCreateOfflineRecognizer(&cfg);
 ```
 
-Per session:
+Per chunk (called by `rtp_asr_sherpa_decode_chunk()`):
 
 ```c
-session->asr_stream = sherpa_onnx_create_online_stream(worker->recognizer);
+SherpaOnnxOfflineStream *stream =
+    SherpaOnnxCreateOfflineStream(worker->recognizer);
+SherpaOnnxAcceptWaveformOffline(stream, 16000, pcm_f32, n_samples);
+SherpaOnnxDecodeOfflineStream(worker->recognizer, stream);
+const SherpaOnnxOfflineRecognizerResult *r =
+    SherpaOnnxGetOfflineStreamResult(stream);
+/* emit transcript, then: */
+SherpaOnnxDestroyOfflineStreamResult(r);
+SherpaOnnxDestroyOfflineStream(stream);
 ```
 
-Per payload:
-
-```c
-sherpa_onnx_online_stream_accept_waveform(session->asr_stream, 16000, pcm_f32, n);
-while (sherpa_onnx_is_online_stream_ready(worker->recognizer, session->asr_stream))
-    sherpa_onnx_decode_online_stream(worker->recognizer, session->asr_stream);
-const SherpaOnnxOnlineRecognizerResult *r =
-    sherpa_onnx_get_online_stream_result(worker->recognizer, session->asr_stream);
-```
+A future stage can swap to an online backend (Zipformer-streaming) behind the
+same `rtp_asr_sherpa_decode_chunk()` API without changing the worker loop.
 
 ### 7.3 Segment finalization and emit
 
 A segment finalizes when **any** of:
-- `sherpa_onnx_online_stream_is_endpoint()` returns true
+- PCM accumulator reaches `segment_seconds` of audio (default 2 s)
 - Silero VAD reports speech→silence with min-silence-ms exceeded
 - Wall-clock max-segment-duration exceeded (default 30 s, safety net)
 
@@ -444,20 +471,84 @@ License: Apache 2.0 (plugin code) + Apache 2.0 (Sherpa-ONNX dynamic link) + LGPL
 
 ## 11. Test harness
 
-Port vpp-ndpi's pytest structure:
+### 11.1 Current test suite (passing)
 
-- `test/test_codec_matrix.py` — for each PT in `{0, 8, 9, 18, 111}`, synthesize
-  a pcap from a known wav (LibriSpeech-telephony reference), replay through VPP,
-  assert transcript matches ground truth within target WER.
-- `test/test_session_lifecycle.py` — concurrent SSRCs, mid-call SSRC rotation,
-  session aging, session rebinding, ring-full backpressure.
-- `test/test_perf_hot_path.py` — `perfmon` harness asserting ≤ 100 ns
-  steady-state per packet in the VPP graph node.
-- `test/test_emit_sinks.py` — syslog / JSON-UDP / gRPC end-to-end roundtrip.
-- `labs/` — interactive tmux demo that replays a real-call pcap and tails
-  transcripts.
-- `models/` — fetch script + checksums; test assets (wav + pcap fixtures) kept
-  small and committed, models downloaded at test setup.
+All tests run inside the Docker dev container via `docker compose run --rm test`.
+
+**`test/test_smoke.py`** — Fast sanity tests (~3 s, no models needed):
+- `test_plugin_loads` — VPP starts with the plugin `.so`, `show version` works
+- `test_rtp_asr_show_stats` — `show rtp-asr stats` CLI reports expected counters
+- `test_rtp_asr_show_version` — `show rtp-asr version` emits plugin version
+
+**`test/test_e2e.py`** — End-to-end tests with the Moonshine model:
+- `test_sherpa_loaded` — `show rtp-asr stats` reports `sherpa loaded: yes`
+- `test_replay_transcribes` — builds a G.711 µ-law RTP pcap from a bundled 8kHz
+  wav (Hawthorne excerpt), injects through VPP packet-generator at 50 pps,
+  collects JSON-UDP transcripts, asserts at least one expected word found
+
+**`test/test_tts_roundtrip.py`** — TTS → pcap → VPP → Moonshine round-trip:
+- `test_tts_roundtrip` — Piper neural TTS synthesizes the pangram ("the quick
+  brown fox jumps over the lazy dog") → ffmpeg anti-aliased downsample to 8 kHz
+  → G.711 µ-law RTP pcap → VPP at 50 pps → Moonshine-tiny-int8 → assert ≥ 5/7
+  expected content words in transcript
+- Skipped unless piper model, Moonshine model, and ffmpeg are present
+
+**Supporting test infrastructure:**
+
+- `test/conftest.py` — shared pytest fixtures: `vpp_instance`, `vpp_e2e`, model
+  availability checks (`model_available()`, `piper_available()`)
+- `test/rtp_synth.py` — `wav_to_ulaw()` + `build_rtp_pcap()` helpers that wrap
+  scapy to synthesize G.711 µ-law RTP/UDP/IP/Ethernet pcaps; supports
+  configurable `dst_mac` (broadcast `ff:ff:ff:ff:ff:ff` required for VPP
+  packet-generator — see §11.3)
+
+### 11.2 Model assets
+
+```
+models/
+├── fetch.sh                         # downloads tiny + piper (required) + base (optional)
+├── sherpa-onnx-moonshine-tiny-en-int8/   # default for CI
+│   ├── preprocess.onnx
+│   ├── encode.int8.onnx
+│   ├── uncached_decode.int8.onnx
+│   ├── cached_decode.int8.onnx
+│   ├── tokens.txt
+│   └── test_wavs/
+│       └── 8k.wav                   # bundled fixture (Hawthorne)
+├── sherpa-onnx-moonshine-base-en-int8/   # optional, better WER
+└── piper/
+    ├── en_US-lessac-medium.onnx     # required by test_tts_roundtrip
+    └── en_US-lessac-medium.onnx.json
+```
+
+`fetch.sh --tiny-only` downloads Moonshine-tiny + Piper voice only (CI default).
+`fetch.sh` without flags adds Moonshine-base for higher-accuracy validation.
+
+### 11.3 VPP packet-generator quirks (VPP 24.x)
+
+Two non-obvious behaviors discovered during end-to-end test development:
+
+**1. `enable-stream <name>` is silently ignored.** In VPP 24.x, calling
+`packet-generator enable-stream stream0` does nothing — stream stays disabled
+with `Count: 0`. Use the no-argument form instead:
+```
+packet-generator enable-stream          # enables ALL streams
+```
+
+**2. Destination MAC must be broadcast.** VPP's `ethernet-input` performs an L3
+MAC check. Packets with a unicast dst MAC that doesn't match the interface's
+assigned MAC are dropped with `l3 mac mismatch`. Since packet-generator
+interfaces don't have a real MAC, use broadcast:
+```python
+Ether(dst="ff:ff:ff:ff:ff:ff") / IP(src=...) / UDP(...) / rtp_payload
+```
+
+### 11.4 Planned tests (not yet written)
+
+- `test/test_codec_matrix.py` — PT 0 / 8 / 9 / 18 / 111 codec coverage
+- `test/test_session_lifecycle.py` — concurrent SSRCs, aging, SSRC rotation
+- `test/test_perf_hot_path.py` — `perfmon` asserts < 100 ns/packet steady state
+- `test/test_emit_sinks.py` — gRPC emitter end-to-end
 
 ## 12. Reuse map
 
@@ -551,8 +642,49 @@ plugin stays out-of-tree, which is correct.
   (50–150 ms TTFT), 26–245 MB footprint, MIT license, designed for CPU-first
   edge deployment. 10.07 % WER (Base) on clean English — not leaderboard-topping
   but sufficient for telephony and well within fine-tuning range.
+- **Moonshine-tiny vs base for testing:** tiny-int8 (26 MB) produces equivalent
+  word accuracy to base-int8 (58 MB) on 8 kHz G.711 synthetic speech in our
+  measurements. The gap is dominated by the acoustic bottleneck, not model capacity.
+  Use tiny in CI (faster load), base for production accuracy claims.
 - **Parakeet-TDT / Canary via Riva** — accuracy upsell and multilingual path;
   reachable via same Sherpa-ONNX abstraction (Parakeet-ONNX) for CPU, or
   TensorRT / Riva gRPC for GPU customers.
 - **The accuracy lift on real telephony comes from fine-tuning**, not from
   bigger models. Deferred to v2.
+
+## Appendix B — TTS calibration for accuracy testing
+
+**Problem:** We need a way to synthesize known-text audio and verify round-trip
+accuracy (TTS → G.711 RTP → VPP plugin → Moonshine → transcript). The choice of
+TTS engine is critical because Moonshine's training data is natural speech;
+synthetic speech that is acoustically far from natural will produce heavily
+garbled output regardless of model quality.
+
+**Calibration results (pangram "the quick brown fox jumps over the lazy dog",
+8 kHz G.711 µ-law, through full VPP pipeline, Moonshine-tiny-int8):**
+
+| TTS engine | Downsampler | Word accuracy | Notes |
+|---|---|---|---|
+| espeak-ng | linear interpolation in rtp_synth.py | ~30% | Formant synthesis + heavy aliasing |
+| espeak-ng | ffmpeg anti-aliased (Kaiser) | ~55% | Better, but formant synthesis mismatches distribution |
+| Piper en_US-lessac-medium | ffmpeg anti-aliased | **~86%** | Near-natural; 6/7 words typical |
+| Piper en_US-lessac-medium + Moonshine-base | ffmpeg anti-aliased | ~86% | No significant gain over tiny on 8kHz G.711 |
+
+**Decision:** Use Piper neural TTS with ffmpeg anti-aliased downsampling. The
+root cause of espeak-ng's failure is acoustic distribution mismatch — Moonshine
+was trained on natural speech and formant synthesis is phonetically implausible
+to its encoder. This is not fixable by tuning; it requires a fundamentally
+different synthesis approach.
+
+**Test accuracy bar:** The TTS roundtrip test requires ≥ 5/7 content words
+(root forms, substring match) to leave headroom for model variance across
+hardware while still catching a broken pipeline. At ~86% measured accuracy
+(≈6/7), requiring 5/7 gives ~2 word of margin.
+
+**Piper API notes:**
+- Package: `pip install piper-tts`; model: `en_US-lessac-medium.onnx` + `.json`
+- Load: `PiperVoice.load(model_path, use_cuda=False)`
+- Synthesize to WAV: `voice.synthesize_wav(text, wave_file_obj)` — the method
+  writes PCM and sets the WAV header (channels/rate/width) automatically
+- Output sample rate: 22050 Hz → must downsample to 8 kHz via ffmpeg (rtp_synth's
+  simple linear interpolation aliases too heavily at this ratio)
