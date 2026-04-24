@@ -66,7 +66,7 @@ RUN mkdir -p /usr/local/lib/pkgconfig && \
 
 # Python test dependencies.
 RUN pip3 install --break-system-packages \
-    vpp-papi scapy pytest pytest-timeout pytest-xdist
+    vpp-papi scapy pytest pytest-timeout pytest-xdist piper-tts
 
 # TTS + resampling CLI for roundtrip test.
 # ffmpeg binary is separate from libavcodec-dev already installed above;
