@@ -23,7 +23,6 @@ def test_plugin_loads(vpp_instance):
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(reason="CLI commands not implemented yet (v1 scaffold)")
 def test_rtp_asr_show_stats(vpp_instance):
     r = subprocess.run(
         ["vppctl", "-s", vpp_instance["cli_sock"], "show", "rtp-asr", "stats"],
@@ -32,4 +31,17 @@ def test_rtp_asr_show_stats(vpp_instance):
         timeout=5,
     )
     assert r.returncode == 0, r.stderr
-    assert "packets" in r.stdout.lower()
+    assert "workers" in r.stdout.lower()
+    assert "rtp packets" in r.stdout.lower()
+
+
+@pytest.mark.integration
+def test_rtp_asr_show_version(vpp_instance):
+    r = subprocess.run(
+        ["vppctl", "-s", vpp_instance["cli_sock"], "show", "rtp-asr", "version"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "vpp-rtp-asr" in r.stdout.lower()

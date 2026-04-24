@@ -21,14 +21,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopus-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# VPP from fd.io packagecloud repo (pins to the same 25.06 line used on dev
-# hosts). Override VPP_VERSION=… at build-time to pin a specific release.
-ARG VPP_VERSION=release
-RUN curl -1sLf 'https://packagecloud.io/fdio/${VPP_VERSION}/gpgkey' | gpg --dearmor > /usr/share/keyrings/fdio.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/fdio.gpg] https://packagecloud.io/fdio/${VPP_VERSION}/ubuntu/ noble main" > /etc/apt/sources.list.d/fdio.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
-        vpp vpp-dev vpp-plugin-core libvppinfra-dev \
-    && rm -rf /var/lib/apt/lists/*
+# VPP from fd.io packagecloud repo. Using the official install script which
+# sets up the apt source and keyring in one shot.
+ARG VPP_REPO=release
+RUN curl -sSL "https://packagecloud.io/install/repositories/fdio/${VPP_REPO}/script.deb.sh" | bash && \
+    apt-get install -y --no-install-recommends \
+        vpp vpp-dev vpp-plugin-core libvppinfra-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 # Sherpa-ONNX — built from source. Pins via SHERPA_VERSION at build-time.
 ARG SHERPA_VERSION=v1.12.39
@@ -61,7 +60,7 @@ RUN mkdir -p /usr/local/lib/pkgconfig && \
         'Name: sherpa-onnx' \
         'Description: Sherpa-ONNX streaming speech recognition' \
         'Version: 1.12.39' \
-        'Libs: -L${libdir} -lsherpa-onnx-c-api -lsherpa-onnx-core -lonnxruntime' \
+        'Libs: -L${libdir} -lsherpa-onnx-c-api -lsherpa-onnx-cxx-api -lonnxruntime' \
         'Cflags: -I${includedir}' \
         > /usr/local/lib/pkgconfig/sherpa-onnx.pc
 
