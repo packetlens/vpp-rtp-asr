@@ -1,0 +1,146 @@
+# Docker Compose — baresip-call lab for vpp-rtp-asr
+#
+# Architecture:
+#
+#   [caller (baresip alice)]          [callee (baresip bob)]
+#        10.66.22.20                       10.66.23.20
+#             │ SIP + RTP (G.711 µ-law)         │
+#             │                                 │
+#        caller-net                        callee-net
+#        (10.66.22.0/24)                (10.66.23.0/24)
+#             │                                 │
+#      ┌──────┴─────────────────────────────────┴──────┐
+#      │          VPP (L3 router + rtp-asr-tap)         │
+#      │   caller0 af_packet  │  callee0 af_packet       │
+#      │   10.66.22.10        │  10.66.23.10             │
+#      │   rtp-asr: ON        │  rtp-asr: ON             │
+#      └──────────────────────┼──────────────────────────┘
+#                             │ JSON-UDP (mgmt-net)
+#                        collector
+#                        10.66.20.30:17879
+#
+# SIP INVITE flows: caller → VPP (router) → callee
+# RTP  flows:       caller → VPP (rtp-asr-tap intercepts) → callee (and back)
+# Transcripts:      VPP emitter → collector (shows live transcription)
+#
+# Usage:
+#   docker compose run --rm build                                  # build plugin
+#   docker compose -f labs/baresip-call/compose.yaml up           # run lab
+#   docker compose -f labs/baresip-call/compose.yaml logs collector
+
+networks:
+  caller-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.22.0/24
+
+  callee-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.23.0/24
+
+  mgmt-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.20.0/24
+
+volumes:
+  vpp-run: {}
+
+services:
+
+  # ── VPP: L3 router with rtp-asr-tap on both sides ───────────────────────────
+  vpp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.dev
+    privileged: true
+    cap_add: [NET_ADMIN, NET_RAW]
+    networks:
+      caller-net:
+        ipv4_address: 10.66.22.10   # claimed by af_packet → caller0
+      callee-net:
+        ipv4_address: 10.66.23.10   # claimed by af_packet → callee0
+      mgmt-net:
+        ipv4_address: 10.66.20.10   # kernel stack; emitter UDP goes out here
+    volumes:
+      - ../..:/src
+      - vpp-run:/run/vpp
+      - ../../models:/models:ro
+    environment:
+      - VPP_RTP_ASR_MODEL_DIR=/models/sherpa-onnx-moonshine-tiny-en-int8
+      - VPP_RTP_ASR_EMITTER_JSON_UDP=10.66.20.30:17879
+    command: [bash, /src/labs/baresip-call/scripts/vpp-start.sh]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "vppctl -s /run/vpp/cli.sock show rtp-asr stats | grep -q 'sherpa loaded:.*yes'"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 25s
+
+  # ── Callee (baresip bob, auto-answer) ────────────────────────────────────────
+  callee:
+    build:
+      context: .
+      dockerfile: Dockerfile.baresip
+    cap_add: [NET_ADMIN]
+    networks:
+      callee-net:
+        ipv4_address: 10.66.23.20
+    volumes:
+      - ../..:/src:ro
+      - ../../models:/models:ro
+    depends_on:
+      vpp:
+        condition: service_healthy
+    command: [bash, /src/labs/baresip-call/scripts/callee-start.sh]
+
+  # ── Caller (baresip alice, places the call) ──────────────────────────────────
+  caller:
+    build:
+      context: .
+      dockerfile: Dockerfile.baresip
+    cap_add: [NET_ADMIN]
+    networks:
+      caller-net:
+        ipv4_address: 10.66.22.20
+    volumes:
+      - ../..:/src:ro
+      - ../../models:/models:ro
+    depends_on:
+      vpp:
+        condition: service_healthy
+      callee:
+        condition: service_started
+    command:
+      - bash
+      - -c
+      - |
+        # Expose the Moonshine test wav at the path baresip's aufile expects
+        mkdir -p /audio
+        ln -sf /models/sherpa-onnx-moonshine-tiny-en-int8/test_wavs/8k.wav /audio/call.wav
+        bash /src/labs/baresip-call/scripts/caller-start.sh
+
+  # ── Transcript collector ─────────────────────────────────────────────────────
+  collector:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.dev
+    networks:
+      mgmt-net:
+        ipv4_address: 10.66.20.30
+    volumes:
+      - ../..:/src
+    depends_on:
+      vpp:
+        condition: service_healthy
+    # 8k.wav transcript: "yet these thoughts affected hester prynne less with hope than apprehension"
+    environment:
+      - EXPECTED_WORDS_CSV=thoughts,affected,hester,hope,apprehension
+      - MIN_WORD_HITS=4
+    command: [python3, /src/scripts/e2e-collector.py]

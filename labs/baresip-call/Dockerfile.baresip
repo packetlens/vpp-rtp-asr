@@ -1,0 +1,17 @@
+# Minimal image for headless baresip caller/callee.
+# Uses aufile.so (no ALSA/audio device needed) + g711.so (PCMU RTP).
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    baresip baresip-core \
+    iproute2 iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify modules we depend on are present
+RUN test -f /usr/lib/baresip/modules/aufile.so && \
+    test -f /usr/lib/baresip/modules/g711.so   && \
+    test -f /usr/lib/baresip/modules/menu.so
+
+WORKDIR /labs
