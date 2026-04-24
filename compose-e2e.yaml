@@ -1,0 +1,101 @@
+# Docker Compose — live-call e2e test for vpp-rtp-asr
+#
+# Architecture:
+#   caller ──(real RTP/UDP, data-net)──► vpp (af_packet) ──(JSON-UDP, mgmt-net)──► collector
+#
+# VPP uses af_packet on its data-net interface so real Ethernet frames from the
+# caller cross the Docker bridge and are processed by the rtp-asr-tap feature node.
+# VPP's own process sockets (JSON-UDP emitter) use the mgmt-net interface which
+# stays under kernel control.
+#
+# Usage:
+#   docker compose run --rm build               # build the plugin first
+#   docker compose -f compose-e2e.yaml up \
+#     --abort-on-container-exit \
+#     --exit-code-from collector
+
+networks:
+  # RTP data plane: caller ↔ VPP af_packet interface
+  data:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+
+  # Management / transcript plane: VPP emitter → collector
+  mgmt:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  vpp-run: {}   # VPP CLI socket; shared between vpp and any debug access
+
+services:
+
+  # ── VPP with rtp-asr plugin ──────────────────────────────────────────────────
+  vpp:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    privileged: true
+    cap_add: [NET_ADMIN, NET_RAW]
+    networks:
+      data:
+        ipv4_address: 172.21.0.10   # af_packet; VPP steals this from kernel
+      mgmt:
+        ipv4_address: 172.20.0.10   # kernel stack; emitter UDP goes out here
+    volumes:
+      - .:/src
+      - vpp-run:/run/vpp
+      - ./models:/models:ro
+    environment:
+      - VPP_RTP_ASR_MODEL_DIR=/models/sherpa-onnx-moonshine-tiny-en-int8
+      # Collector IP on mgmt-net; emitter.c resolves via getaddrinfo()
+      - VPP_RTP_ASR_EMITTER_JSON_UDP=172.20.0.30:17879
+    command: [bash, /src/scripts/e2e-vpp-start.sh]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "vppctl -s /run/vpp/cli.sock show rtp-asr stats | grep -q 'sherpa loaded:.*yes'"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 25s   # Moonshine-tiny-int8 loads in ~3-5s; leave margin
+
+  # ── Piper TTS → ffmpeg RTP sender ────────────────────────────────────────────
+  caller:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    networks:
+      data:
+        ipv4_address: 172.21.0.20
+    volumes:
+      - .:/src
+      - ./models:/models:ro
+    environment:
+      - PIPER_MODEL=/models/piper/en_US-lessac-medium.onnx
+      - VPP_RTP_HOST=172.21.0.10
+      - VPP_RTP_PORT=16400
+      - LOOPS=3   # 3× pangram ≈ 12s of audio → at least 3 Moonshine chunks
+    depends_on:
+      vpp:
+        condition: service_healthy
+    command: [bash, /src/scripts/e2e-caller.sh]
+
+  # ── JSON-UDP transcript collector + validator ─────────────────────────────────
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    networks:
+      mgmt:
+        ipv4_address: 172.20.0.30
+    volumes:
+      - .:/src
+    depends_on:
+      vpp:
+        condition: service_healthy
+    command: [python3, /src/scripts/e2e-collector.py]
