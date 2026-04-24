@@ -12,8 +12,11 @@ ip route show | grep 10.66
 # Give the callee a moment to register its SIP UA
 sleep 3
 
+mkdir -p /tmp/baresip-caller
+cp /src/labs/baresip-call/config/caller/config   /tmp/baresip-caller/config
+cp /src/labs/baresip-call/config/caller/accounts /tmp/baresip-caller/accounts
 echo "[caller] Dialing bob@10.66.23.20 ..."
 exec baresip \
-  -f /src/labs/baresip-call/config/caller \
+  -f /tmp/baresip-caller \
   -e "/dial sip:bob@10.66.23.20" \
   -t 45

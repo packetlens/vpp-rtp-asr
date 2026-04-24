@@ -3,6 +3,8 @@
 #
 
 # Audio via file I/O — no ALSA/portaudio needed
+module_path		/usr/lib/baresip/modules
+module			account.so
 module			aufile.so
 module			g711.so
 module			menu.so
