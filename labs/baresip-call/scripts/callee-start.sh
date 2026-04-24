@@ -9,7 +9,8 @@ ip route add 10.66.22.0/24 via 10.66.23.10 2>/dev/null || true
 echo "[callee] Routes:"
 ip route show | grep 10.66
 
+mkdir -p /tmp/baresip-callee
+cp /src/labs/baresip-call/config/callee/config   /tmp/baresip-callee/config
+cp /src/labs/baresip-call/config/callee/accounts /tmp/baresip-callee/accounts
 echo "[callee] Listening for SIP calls (auto-answer enabled) ..."
-exec baresip \
-  -f /src/labs/baresip-call/config/callee \
-  -t 90
+exec baresip -f /tmp/baresip-callee -t 90

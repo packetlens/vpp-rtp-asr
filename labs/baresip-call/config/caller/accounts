@@ -1,1 +1,1 @@
-<sip:alice@10.66.22.20>;auth_user=alice;auth_pass=secret;
+<sip:alice@10.66.22.20>;regint=0;auth_user=alice;auth_pass=secret;

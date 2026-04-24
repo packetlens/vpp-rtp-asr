@@ -49,8 +49,9 @@ echo "[caller] Streaming ${TOTAL}s → ${VPP_RTP_HOST}:${VPP_RTP_PORT}"
 # Capture TX stats before sending
 TX_BEFORE=$(ip -s link show eth0 | awk '/TX:/{getline; print $2}')
 
-ffmpeg -re -block_size 320 -i /tmp/tts_long.wav \
-  -vn -ar 8000 -ac 1 -acodec pcm_mulaw \
+ffmpeg -re -i /tmp/tts_long.wav \
+  -vn -af "asetnsamples=n=160:p=1" \
+  -ar 8000 -ac 1 -acodec pcm_mulaw \
   -f rtp "rtp://${VPP_RTP_HOST}:${VPP_RTP_PORT}" \
   -loglevel error
 
