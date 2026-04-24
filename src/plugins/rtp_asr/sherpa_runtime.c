@@ -56,6 +56,30 @@ file_exists (const char *p)
   return p && stat (p, &st) == 0;
 }
 
+/* Resolve a model file. Sherpa-ONNX publishes Moonshine with either:
+ *   - `.int8.onnx` (quantized) — the default published tarballs
+ *   - `.onnx`     (float)      — less common
+ * Try the int8 variant first; fall back to plain. The preprocess file is
+ * always `.onnx` in published bundles.  */
+static int
+resolve_onnx (char *out, size_t cap, const char *dir, const char *stem)
+{
+  char p[512];
+  snprintf (p, sizeof p, "%s/%s.int8.onnx", dir, stem);
+  if (file_exists (p))
+    {
+      snprintf (out, cap, "%s", p);
+      return 0;
+    }
+  snprintf (p, sizeof p, "%s/%s.onnx", dir, stem);
+  if (file_exists (p))
+    {
+      snprintf (out, cap, "%s", p);
+      return 0;
+    }
+  return -1;
+}
+
 int
 rtp_asr_sherpa_global_init (const char *model_dir)
 {
@@ -64,21 +88,23 @@ rtp_asr_sherpa_global_init (const char *model_dir)
 
   snprintf (g_sherpa.preprocess_path, sizeof g_sherpa.preprocess_path,
 	    "%s/preprocess.onnx", model_dir);
-  snprintf (g_sherpa.encode_path, sizeof g_sherpa.encode_path,
-	    "%s/encode.onnx", model_dir);
-  snprintf (g_sherpa.uncached_decode_path, sizeof g_sherpa.uncached_decode_path,
-	    "%s/uncached_decode.onnx", model_dir);
-  snprintf (g_sherpa.cached_decode_path, sizeof g_sherpa.cached_decode_path,
-	    "%s/cached_decode.onnx", model_dir);
   snprintf (g_sherpa.tokens_path, sizeof g_sherpa.tokens_path,
 	    "%s/tokens.txt", model_dir);
 
   if (!file_exists (g_sherpa.preprocess_path) ||
-      !file_exists (g_sherpa.encode_path) ||
-      !file_exists (g_sherpa.uncached_decode_path) ||
-      !file_exists (g_sherpa.cached_decode_path) ||
       !file_exists (g_sherpa.tokens_path))
     return -2;
+  if (resolve_onnx (g_sherpa.encode_path, sizeof g_sherpa.encode_path,
+		    model_dir, "encode") != 0)
+    return -3;
+  if (resolve_onnx (g_sherpa.uncached_decode_path,
+		    sizeof g_sherpa.uncached_decode_path, model_dir,
+		    "uncached_decode") != 0)
+    return -4;
+  if (resolve_onnx (g_sherpa.cached_decode_path,
+		    sizeof g_sherpa.cached_decode_path, model_dir,
+		    "cached_decode") != 0)
+    return -5;
 
   SherpaOnnxOfflineRecognizerConfig cfg;
   memset (&cfg, 0, sizeof (cfg));

@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <stdlib.h>
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
 #include <rtp_asr/rtp_asr.h>
@@ -156,4 +157,76 @@ VLIB_CLI_COMMAND (show_rtp_asr_sessions_cmd, static) = {
   .path = "show rtp-asr sessions",
   .short_help = "show rtp-asr sessions",
   .function = show_rtp_asr_sessions_fn,
+};
+
+/* ---------- rtp-asr set model <dir>  /  rtp-asr set emitter ... ---------- */
+
+static clib_error_t *
+rtp_asr_set_model_fn (vlib_main_t *vm, unformat_input_t *input,
+		      vlib_cli_command_t *cmd)
+{
+  u8 *path = 0;
+  if (!unformat (input, "%s", &path))
+    return clib_error_return (0, "usage: rtp-asr set model <dir>");
+  vec_add1 (path, 0);
+  int rv = rtp_asr_sherpa_global_init ((const char *) path);
+  if (rv != 0)
+    {
+      clib_error_t *err =
+	  clib_error_return (0, "sherpa load failed rv=%d for '%s'", rv, path);
+      vec_free (path);
+      return err;
+    }
+  rtp_asr_main.model_dir = (char *) path; /* ownership transferred */
+  vlib_cli_output (vm, "rtp-asr: model loaded from %s", path);
+  return 0;
+}
+
+VLIB_CLI_COMMAND (rtp_asr_set_model_cmd, static) = {
+  .path = "rtp-asr set model",
+  .short_help = "rtp-asr set model <dir>",
+  .function = rtp_asr_set_model_fn,
+};
+
+static clib_error_t *
+rtp_asr_set_emitter_fn (vlib_main_t *vm, unformat_input_t *input,
+			vlib_cli_command_t *cmd)
+{
+  u8 *target = 0;
+  u8 kind = 255;
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "syslog"))
+	kind = 0;
+      else if (unformat (input, "json-udp %s", &target))
+	kind = 1;
+      else
+	return clib_error_return (
+	    0, "usage: rtp-asr set emitter syslog | json-udp <host:port>");
+    }
+  if (kind == 255)
+    return clib_error_return (0, "usage: rtp-asr set emitter ...");
+  if (target)
+    vec_add1 (target, 0);
+  int rv = rtp_asr_emitter_init (kind, target ? (const char *) target : NULL);
+  if (rv != 0)
+    {
+      clib_error_t *err =
+	  clib_error_return (0, "emitter init failed rv=%d", rv);
+      if (target)
+	vec_free (target);
+      return err;
+    }
+  rtp_asr_main.emitter_sink = kind;
+  if (rtp_asr_main.emitter_target)
+    free (rtp_asr_main.emitter_target);
+  rtp_asr_main.emitter_target = target ? (char *) target : NULL;
+  vlib_cli_output (vm, "rtp-asr: emitter set");
+  return 0;
+}
+
+VLIB_CLI_COMMAND (rtp_asr_set_emitter_cmd, static) = {
+  .path = "rtp-asr set emitter",
+  .short_help = "rtp-asr set emitter syslog | json-udp <host:port>",
+  .function = rtp_asr_set_emitter_fn,
 };
