@@ -1,0 +1,15 @@
+build/
+debs/
+*.o
+*.a
+*.so
+*.pyc
+__pycache__/
+.pytest_cache/
+*.log
+labs/screenshots/
+models/*.onnx
+models/*.bin
+models/*.tokens
+test/fixtures/*.wav
+test/fixtures/*.pcap
