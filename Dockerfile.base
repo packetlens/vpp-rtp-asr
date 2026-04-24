@@ -68,4 +68,10 @@ RUN mkdir -p /usr/local/lib/pkgconfig && \
 RUN pip3 install --break-system-packages \
     vpp-papi scapy pytest pytest-timeout pytest-xdist
 
+# TTS + resampling CLI for roundtrip test.
+# ffmpeg binary is separate from libavcodec-dev already installed above;
+# shared libs are already present so this adds only the ffmpeg executable.
+RUN apt-get update && apt-get install -y --no-install-recommends espeak-ng ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src

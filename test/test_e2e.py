@@ -8,9 +8,7 @@ Skipped unless a Moonshine model is fetched under
 
 import json
 import os
-import signal
 import socket
-import struct
 import subprocess
 import sys
 import time
@@ -18,94 +16,15 @@ import time
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
+from conftest import MODEL_DIR, EMITTER_HOST, EMITTER_PORT, model_available  # noqa: E402
 from rtp_synth import wav_to_ulaw, build_rtp_pcap  # noqa: E402
 
 
-SRC = os.environ.get("SRC_DIR", "/src")
-MODEL_DIR = os.path.join(SRC, "models", "sherpa-onnx-moonshine-tiny-en-int8")
 TEST_WAV = os.path.join(MODEL_DIR, "test_wavs", "8k.wav")
-EMITTER_HOST = "127.0.0.1"
-EMITTER_PORT = 17879
-
-
-def model_available():
-    needed = ["preprocess.onnx", "tokens.txt"]
-    if not os.path.isdir(MODEL_DIR):
-        return False
-    for n in needed:
-        if not os.path.exists(os.path.join(MODEL_DIR, n)):
-            return False
-    return True
-
 
 pytestmark = pytest.mark.skipif(
     not model_available(), reason="Moonshine model not present — run models/fetch.sh"
 )
-
-
-def find_plugin_so():
-    build_dir = os.environ.get("PLUGIN_BUILD_DIR", os.path.join(SRC, "build"))
-    for root, _, files in os.walk(build_dir):
-        for f in files:
-            if f == "rtp_asr_plugin.so":
-                return os.path.join(root, f)
-    return None
-
-
-def make_startup_conf(plugin_so, run_dir, log_file, prefix):
-    plugin_dir = os.path.dirname(plugin_so)
-    return f"""
-unix {{
-  nodaemon
-  log {log_file}
-  full-coredump
-  cli-listen {run_dir}/cli.sock
-  gid vpp
-}}
-api-segment {{
-  prefix {prefix}
-}}
-plugins {{
-  path {plugin_dir}
-  plugin default {{ disable }}
-  plugin rtp_asr_plugin.so {{ enable }}
-}}
-"""
-
-
-@pytest.fixture
-def vpp_e2e(tmp_path):
-    plugin_so = find_plugin_so()
-    if not plugin_so:
-        pytest.skip("plugin .so not built")
-
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    log_file = tmp_path / "vpp.log"
-    prefix = f"rtp-asr-e2e-{os.getpid()}"
-    conf = run_dir / "startup.conf"
-    conf.write_text(make_startup_conf(plugin_so, str(run_dir), str(log_file), prefix))
-
-    env = os.environ.copy()
-    env["VPP_RTP_ASR_MODEL_DIR"] = MODEL_DIR
-    env["VPP_RTP_ASR_EMITTER_JSON_UDP"] = f"{EMITTER_HOST}:{EMITTER_PORT}"
-    proc = subprocess.Popen(
-        ["vpp", "-c", str(conf)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.STDOUT,
-        env=env,
-    )
-    cli_sock = run_dir / "cli.sock"
-    for _ in range(80):
-        if cli_sock.exists():
-            break
-        time.sleep(0.1)
-    yield {"proc": proc, "cli_sock": str(cli_sock), "tmp_path": tmp_path}
-    proc.send_signal(signal.SIGTERM)
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
 
 
 def vppctl(sock, *args):
