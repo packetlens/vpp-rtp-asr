@@ -1,0 +1,34 @@
+#
+# baresip config — caller (headless, no audio device)
+#
+
+# Audio via file I/O — no ALSA/portaudio needed
+module			aufile.so
+module			g711.so
+module			menu.so
+
+# Use aufile for source (looped WAV) and player (discard)
+audio_source		aufile,/audio/call.wav
+audio_player		aufile,/dev/null
+ausrc_srate		8000
+auplay_srate		8000
+ausrc_channels		1
+auplay_channels		1
+ausrc_format		s16
+auplay_format		s16
+audio_buffer		20-160
+
+# SIP
+sip_listen		0.0.0.0:5060
+call_local_timeout	120
+call_max_calls		2
+
+# RTP — port range must overlap VPP's rtp_port_min..rtp_port_max (16384-32768)
+rtp_ports		16390-16400
+
+# Prefer PCMU (G.711 µ-law, PT=0) — VPP's rtp-asr decodes it with inline LUT
+audio_codecs		pcmu/8000/1
+
+# Misc
+poll_method		epoll
+sip_trans_bsize		1024

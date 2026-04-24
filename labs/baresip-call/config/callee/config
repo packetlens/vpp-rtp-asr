@@ -1,0 +1,29 @@
+#
+# baresip config — callee (headless, auto-answer, no audio device)
+#
+
+module			aufile.so
+module			g711.so
+module			menu.so
+
+# Receive audio into a file; source is silence (ausine not needed here)
+audio_source		aufile,/dev/zero
+audio_player		aufile,/tmp/callee-received.wav
+ausrc_srate		8000
+auplay_srate		8000
+ausrc_channels		1
+auplay_channels		1
+ausrc_format		s16
+auplay_format		s16
+audio_buffer		20-160
+
+# SIP
+sip_listen		0.0.0.0:5060
+call_local_timeout	120
+call_max_calls		2
+
+rtp_ports		16390-16400
+audio_codecs		pcmu/8000/1
+
+poll_method		epoll
+sip_trans_bsize		1024

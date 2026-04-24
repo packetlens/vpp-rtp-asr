@@ -1,12 +1,20 @@
 # Docker Compose — live-call e2e test for vpp-rtp-asr
 #
-# Architecture:
-#   caller ──(real RTP/UDP, data-net)──► vpp (af_packet) ──(JSON-UDP, mgmt-net)──► collector
+# Architecture (3-container data path, matching baresip-call lab design):
 #
-# VPP uses af_packet on its data-net interface so real Ethernet frames from the
-# caller cross the Docker bridge and are processed by the rtp-asr-tap feature node.
-# VPP's own process sockets (JSON-UDP emitter) use the mgmt-net interface which
-# stays under kernel control.
+#   caller-net (10.66.21.0/24)           sink-net (10.66.23.0/24)
+#
+#   [caller]──────────────────►[vpp]──────────────────►[sink]
+#    ffmpeg RTP     host-eth0        host-eth1         nc -lu
+#    →10.66.23.20   10.66.21.10      10.66.23.10       :16400
+#    via VPP        rtp-asr: ON      rtp-asr: ON
+#                        │ JSON-UDP (mgmt-net)
+#                   [collector]
+#                   10.66.20.30:17879
+#
+# VPP acts as a ROUTER between caller-net and sink-net.  RTP packets are
+# transit traffic — rtp-asr-tap intercepts them as VPP forwards each packet.
+# The emitter sends JSON-UDP transcripts to the collector on a separate mgmt net.
 #
 # Usage:
 #   docker compose run --rm build               # build the plugin first
@@ -15,26 +23,30 @@
 #     --exit-code-from collector
 
 networks:
-  # RTP data plane: caller ↔ VPP af_packet interface
-  data:
+  caller-net:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.21.0.0/24
+        - subnet: 10.66.21.0/24
 
-  # Management / transcript plane: VPP emitter → collector
+  sink-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.23.0/24
+
   mgmt:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/24
+        - subnet: 10.66.20.0/24
 
 volumes:
-  vpp-run: {}   # VPP CLI socket; shared between vpp and any debug access
+  vpp-run: {}
 
 services:
 
-  # ── VPP with rtp-asr plugin ──────────────────────────────────────────────────
+  # ── VPP: L3 router with rtp-asr-tap on both sides ───────────────────────────
   vpp:
     build:
       context: .
@@ -42,48 +54,80 @@ services:
     privileged: true
     cap_add: [NET_ADMIN, NET_RAW]
     networks:
-      data:
-        ipv4_address: 172.21.0.10   # af_packet; VPP steals this from kernel
+      caller-net:
+        ipv4_address: 10.66.21.10   # VPP data-plane, caller side
+      sink-net:
+        ipv4_address: 10.66.23.10   # VPP data-plane, sink side
       mgmt:
-        ipv4_address: 172.20.0.10   # kernel stack; emitter UDP goes out here
+        ipv4_address: 10.66.20.10   # kernel stack; emitter UDP goes out here
     volumes:
       - .:/src
       - vpp-run:/run/vpp
       - ./models:/models:ro
     environment:
       - VPP_RTP_ASR_MODEL_DIR=/models/sherpa-onnx-moonshine-tiny-en-int8
-      # Collector IP on mgmt-net; emitter.c resolves via getaddrinfo()
-      - VPP_RTP_ASR_EMITTER_JSON_UDP=172.20.0.30:17879
+      - VPP_RTP_ASR_EMITTER_JSON_UDP=10.66.20.30:17879
     command: [bash, /src/scripts/e2e-vpp-start.sh]
     healthcheck:
       test:
         - CMD-SHELL
-        - "vppctl -s /run/vpp/cli.sock show rtp-asr stats | grep -q 'sherpa loaded:.*yes'"
-      interval: 3s
+        - "test -f /tmp/vpp-interfaces-ready && vppctl -s /run/vpp/cli.sock show rtp-asr stats | grep -q 'sherpa loaded:.*yes'"
+      interval: 2s
       timeout: 5s
-      retries: 30
-      start_period: 25s   # Moonshine-tiny-int8 loads in ~3-5s; leave margin
+      retries: 60
+      start_period: 5s
+
+  # ── Silent RTP sink (receives forwarded audio, discards it) ──────────────────
+  sink:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    cap_add: [NET_ADMIN]
+    networks:
+      sink-net:
+        ipv4_address: 10.66.23.20
+    depends_on:
+      vpp:
+        condition: service_healthy
+    # Add route to caller-net via VPP's sink-side IP, then count RTP packets
+    volumes:
+      - .:/src
+    command:
+      - bash
+      - -c
+      - |
+        ip route add 10.66.21.0/24 via 10.66.23.10 2>/dev/null || true
+        exec python3 /src/scripts/e2e-sink.py
 
   # ── Piper TTS → ffmpeg RTP sender ────────────────────────────────────────────
   caller:
     build:
       context: .
       dockerfile: Dockerfile.dev
+    cap_add: [NET_ADMIN]
     networks:
-      data:
-        ipv4_address: 172.21.0.20
+      caller-net:
+        ipv4_address: 10.66.21.20
     volumes:
       - .:/src
       - ./models:/models:ro
     environment:
       - PIPER_MODEL=/models/piper/en_US-lessac-medium.onnx
-      - VPP_RTP_HOST=172.21.0.10
+      - VPP_RTP_HOST=10.66.23.20   # send to the sink (through VPP as router)
       - VPP_RTP_PORT=16400
-      - LOOPS=3   # 3× pangram ≈ 12s of audio → at least 3 Moonshine chunks
+      - LOOPS=6
     depends_on:
       vpp:
         condition: service_healthy
-    command: [bash, /src/scripts/e2e-caller.sh]
+      sink:
+        condition: service_started
+    # Add route to sink-net via VPP's caller-side IP, then synthesize and send
+    command:
+      - bash
+      - -c
+      - |
+        ip route add 10.66.23.0/24 via 10.66.21.10 2>/dev/null || true
+        exec bash /src/scripts/e2e-caller.sh
 
   # ── JSON-UDP transcript collector + validator ─────────────────────────────────
   collector:
@@ -92,7 +136,7 @@ services:
       dockerfile: Dockerfile.dev
     networks:
       mgmt:
-        ipv4_address: 172.20.0.30
+        ipv4_address: 10.66.20.30
     volumes:
       - .:/src
     depends_on:
