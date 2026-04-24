@@ -98,6 +98,14 @@ show_rtp_asr_stats_fn (vlib_main_t *vm, unformat_input_t *input,
   vlib_cli_output (vm, "malformed rtp:      %llu", malformed);
   vlib_cli_output (vm, "udp not rtp:        %llu", not_rtp);
   vlib_cli_output (vm, "not udp:            %llu", not_udp);
+  vlib_cli_output (vm, "worker processed:   %llu",
+		   rtp_asr_worker_processed_total ());
+  vlib_cli_output (vm, "decode errors:      %llu",
+		   rtp_asr_worker_decode_errors_total ());
+  vlib_cli_output (vm, "segments emitted:   %llu",
+		   rtp_asr_worker_segments_total ());
+  vlib_cli_output (vm, "sherpa loaded:      %s",
+		   rtp_asr_sherpa_is_loaded () ? "yes" : "no");
   return 0;
 }
 

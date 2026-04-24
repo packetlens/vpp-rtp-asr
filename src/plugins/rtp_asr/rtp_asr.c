@@ -22,6 +22,8 @@ rtp_asr_config_fn (vlib_main_t *vm, unformat_input_t *input)
   rm->rtp_port_min = 16384;
   rm->rtp_port_max = 32768;
   rm->rtp_port_well_known = 5004;
+  rm->segment_seconds = 2.0f;
+  rm->emitter_sink = 0; /* syslog */
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
@@ -30,12 +32,20 @@ rtp_asr_config_fn (vlib_main_t *vm, unformat_input_t *input)
       else if (unformat (input, "expiry-seconds %f",
 			 &rm->session_expiry_seconds))
 	;
+      else if (unformat (input, "segment-seconds %f", &rm->segment_seconds))
+	;
       else if (unformat (input, "rtp-port-range %u-%u", &rm->rtp_port_min,
 			 &rm->rtp_port_max))
 	;
       else if (unformat (input, "rtp-port-well-known %u",
 			 &rm->rtp_port_well_known))
 	;
+      else if (unformat (input, "model-dir %s", &rm->model_dir))
+	;
+      else if (unformat (input, "emitter-syslog"))
+	rm->emitter_sink = 0;
+      else if (unformat (input, "emitter-json-udp %s", &rm->emitter_target))
+	rm->emitter_sink = 1;
       else
 	return clib_error_return (0, "unknown rtp-asr config: '%U'",
 				  format_unformat_error, input);
@@ -75,6 +85,32 @@ rtp_asr_init (vlib_main_t *vm)
 				  "session table init failed worker %u", i);
       w->initialized = 1;
     }
+
+  rtp_asr_codec_init ();
+
+  /* Sherpa-ONNX is optional — plugin still taps and counts RTP if no model
+   * is configured. Non-fatal if load fails; logs a warning and transcripts
+   * are skipped. */
+  if (rm->model_dir && *rm->model_dir)
+    {
+      int rv = rtp_asr_sherpa_global_init (rm->model_dir);
+      if (rv != 0)
+	vlib_log_warn (rm->log_class,
+		       "Sherpa-ONNX model load failed (%d) for dir '%s' — "
+		       "transcription disabled", rv, rm->model_dir);
+      else
+	vlib_log_info (rm->log_class,
+		       "Sherpa-ONNX loaded: Moonshine model @ '%s'",
+		       rm->model_dir);
+    }
+
+  if (rtp_asr_emitter_init (rm->emitter_sink, rm->emitter_target) != 0)
+    vlib_log_warn (rm->log_class, "emitter init failed (sink=%u target='%s')",
+		   rm->emitter_sink,
+		   rm->emitter_target ? rm->emitter_target : "(null)");
+
+  if (rtp_asr_worker_pool_start (n_threads) != 0)
+    return clib_error_return (0, "asr worker pool start failed");
 
   vlib_log_info (rm->log_class,
 		 "initialized: %u threads, %u sessions/worker, expiry=%.1fs, "

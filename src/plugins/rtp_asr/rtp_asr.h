@@ -78,14 +78,20 @@ typedef struct
   f64 last_seen;
   u32 sw_if_index;
 
-  /* codec + ASR — opaque; NULL in minimum-compile scope */
+  /* codec + ASR — opaque pointers; allocated on first decode. */
   void *codec_ctx;
   void *swr_ctx;
   void *asr_stream;
   void *vad_ctx;
-  f32  *pcm_window;
-  u32   pcm_samples;
-  u32   owned_linux_worker_id;
+
+  /* Per-session PCM accumulator @ 16 kHz f32 for chunk-based offline ASR. */
+  f32 *pcm_window;
+  u32  pcm_samples;
+  u32  pcm_window_cap;
+  u32  segment_rtp_ts_first;
+  u32  segment_rtp_ts_last;
+  u64  segments_emitted;
+  u32  owned_linux_worker_id;
 } rtp_asr_session_t;
 
 /* Per-VPP-worker state. One struct per VPP worker thread. */
@@ -94,6 +100,10 @@ typedef struct
   rtp_asr_session_t *sessions;    /* pool */
   clib_bihash_16_8_t v4_ht;
   clib_bihash_48_8_t v6_ht;
+
+  /* SPSC ring to this worker's assigned Linux thread. Opaque in this
+   * header; rtp_asr_ring_t defined in asr_worker.c. */
+  void *payload_ring;
 
   /* counters */
   u64 packets;
@@ -123,6 +133,12 @@ typedef struct
   u16 rtp_port_min;
   u16 rtp_port_max;
   u16 rtp_port_well_known;
+  f32 segment_seconds;         /* how much audio to accumulate per sherpa call */
+
+  /* model + emitter */
+  char *model_dir;             /* NULL = ASR disabled; plugin still taps RTP */
+  u8    emitter_sink;          /* 0=syslog, 1=json-udp */
+  char *emitter_target;
 
   u16 msg_id_base;
   vlib_log_class_t log_class;
@@ -147,5 +163,59 @@ rtp_asr_session_t *rtp_asr_session_lookup_or_create4 (
     rtp_asr_worker_t *w, const rtp_asr_session_key4_t *key, int *created);
 rtp_asr_session_t *rtp_asr_session_lookup_or_create6 (
     rtp_asr_worker_t *w, const rtp_asr_session_key6_t *key, int *created);
+
+/* Supported codec kinds — v1 */
+typedef enum
+{
+  RTP_ASR_CODEC_UNKNOWN = 0,
+  RTP_ASR_CODEC_G711_MU,
+  RTP_ASR_CODEC_G711_A,
+  RTP_ASR_CODEC_G722,
+  RTP_ASR_CODEC_G729,
+  RTP_ASR_CODEC_OPUS,
+  RTP_ASR_CODEC_AMR_WB,
+  RTP_ASR_CODEC_DYNAMIC,
+} rtp_asr_codec_t;
+
+/* codec_decode.c */
+void rtp_asr_codec_init (void);
+int  rtp_asr_codec_setup_for_session (rtp_asr_session_t *s);
+int  rtp_asr_codec_decode (rtp_asr_session_t *s,
+			   const u8 *payload, u32 payload_len,
+			   f32 *pcm_f32, u32 *n_samples);
+void rtp_asr_codec_teardown (rtp_asr_session_t *s);
+
+/* resample.c */
+int  rtp_asr_resample_to_16k (rtp_asr_session_t *s,
+			      const f32 *in, u32 in_samples,
+			      f32 *out, u32 *out_samples);
+void rtp_asr_resample_teardown (rtp_asr_session_t *s);
+
+/* asr_worker.c */
+int  rtp_asr_worker_pool_start (u32 vpp_worker_count);
+void rtp_asr_worker_pool_stop (void);
+int  rtp_asr_ring_enqueue (rtp_asr_worker_t *w, u32 session_idx,
+			   const u8 *payload, u32 payload_len,
+			   u32 rtp_ts, f64 vpp_time);
+u64  rtp_asr_worker_processed_total (void);
+u64  rtp_asr_worker_decode_errors_total (void);
+u64  rtp_asr_worker_segments_total (void);
+
+/* sherpa_runtime.c */
+int  rtp_asr_sherpa_global_init (const char *model_dir);
+int  rtp_asr_sherpa_is_loaded (void);
+/* Decode a single chunk of 16 kHz mono f32; writes the transcript (nul-term)
+ * into text_buf (size text_buf_cap). Returns number of chars written, 0 if
+ * empty, negative on error. Thread-safe: each call allocates its own stream. */
+int  rtp_asr_sherpa_decode_chunk (const f32 *pcm_16k, u32 n,
+				  char *text_buf, u32 text_buf_cap);
+void rtp_asr_sherpa_global_shutdown (void);
+
+/* emitter.c */
+int  rtp_asr_emitter_init (u8 sink, const char *target);
+void rtp_asr_emitter_publish (const rtp_asr_session_t *s,
+			      const char *text, u8 is_final,
+			      u32 rtp_ts_first, u32 rtp_ts_last);
+void rtp_asr_emitter_shutdown (void);
 
 #endif /* __included_vpp_rtp_asr_h__ */

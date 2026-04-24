@@ -199,6 +199,13 @@ rtp_asr_observe_v4 (rtp_asr_worker_t *w, ip4_header_t *ip0, u32 ip_len,
   w->bytes += pkt_bytes;
   (*n_processed)++;
 
+  /* Hand the payload off to the Linux worker thread for decode + ASR. */
+  u32 session_idx = (u32) (s - w->sessions);
+  u32 copy_len = udp_payload_len - sizeof (rtp_hdr_t);
+  const u8 *rtp_body = udp_payload + sizeof (rtp_hdr_t);
+  if (rtp_asr_ring_enqueue (w, session_idx, rtp_body, copy_len, ts, now) != 0)
+    w->ring_full_drops++;
+
   trace->sw_if_index = sw_if_index;
   trace->ssrc = ssrc;
   trace->src_port = sport;
@@ -281,6 +288,12 @@ rtp_asr_observe_v6 (rtp_asr_worker_t *w, ip6_header_t *ip0, u32 ip_len,
   w->packets++;
   w->bytes += pkt_bytes;
   (*n_processed)++;
+
+  u32 session_idx = (u32) (s - w->sessions);
+  u32 copy_len = udp_payload_len - sizeof (rtp_hdr_t);
+  const u8 *rtp_body = udp_payload + sizeof (rtp_hdr_t);
+  if (rtp_asr_ring_enqueue (w, session_idx, rtp_body, copy_len, ts, now) != 0)
+    w->ring_full_drops++;
 
   trace->sw_if_index = sw_if_index;
   trace->ssrc = ssrc;
