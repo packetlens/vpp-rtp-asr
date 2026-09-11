@@ -6,6 +6,11 @@ via [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx) off-path on dedicated
 Linux worker threads. Part of the PacketLens plugin family, maintained by
 [PacketFlow](https://packetflow.dev).
 
+> **Status: pre-production.** Lab-validated on our own bench, not yet deployed in
+> production. Any performance figures below are bench measurements, not production
+> telemetry.
+
+
 ## What it does
 
 The plugin hooks into the VPP `ip4-unicast` feature arc. For every RTP/UDP packet
