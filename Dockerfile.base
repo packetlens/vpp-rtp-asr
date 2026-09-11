@@ -1,0 +1,77 @@
+# Base image: Ubuntu + VPP from fd.io repo + FFmpeg/Opus/Sherpa-ONNX + dev tools.
+#
+# Building sherpa-onnx from source takes ~15 minutes the first time. All
+# subsequent builds of the plugin itself are fast (vpp-rtp-asr is small).
+#
+# Local: docker build -f Dockerfile.base -t vpp-rtp-asr-dev:base .
+# CI:    docker build -f Dockerfile.base -t ghcr.io/packetlens/vpp-rtp-asr-dev:base .
+
+ARG UBUNTU_VERSION=24.04
+FROM ubuntu:${UBUNTU_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System packages: build tools, test tools, codec libs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates sudo curl wget tmux gnupg \
+    build-essential cmake ninja-build pkg-config \
+    python3 python3-pip python3-venv python3-ply \
+    gdb tcpdump iproute2 iputils-ping tcpreplay socat jq \
+    libavcodec-dev libavutil-dev libswresample-dev libavformat-dev \
+    libopus-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# VPP from fd.io packagecloud repo. Using the official install script which
+# sets up the apt source and keyring in one shot.
+ARG VPP_REPO=release
+RUN curl -sSL "https://packagecloud.io/install/repositories/fdio/${VPP_REPO}/script.deb.sh" | bash && \
+    apt-get install -y --no-install-recommends \
+        vpp vpp-dev vpp-plugin-core libvppinfra-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Sherpa-ONNX — built from source. Pins via SHERPA_VERSION at build-time.
+ARG SHERPA_VERSION=v1.12.39
+RUN git clone --depth 1 --branch ${SHERPA_VERSION} https://github.com/k2-fsa/sherpa-onnx.git /tmp/sherpa-onnx && \
+    cd /tmp/sherpa-onnx && mkdir build && cd build && \
+    cmake -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DBUILD_SHARED_LIBS=ON \
+          -DSHERPA_ONNX_ENABLE_PYTHON=OFF \
+          -DSHERPA_ONNX_ENABLE_TESTS=OFF \
+          -DSHERPA_ONNX_ENABLE_CHECK=OFF \
+          -DSHERPA_ONNX_ENABLE_PORTAUDIO=OFF \
+          -DSHERPA_ONNX_ENABLE_JNI=OFF \
+          -DSHERPA_ONNX_ENABLE_BINARY=OFF \
+          .. && \
+    ninja && ninja install && \
+    ldconfig && \
+    rm -rf /tmp/sherpa-onnx
+
+# Provide a pkg-config file so our CMakeLists' pkg_check_modules(SHERPA_ONNX)
+# can find it. Sherpa-ONNX's CMake installs headers + libs but not a .pc file.
+RUN mkdir -p /usr/local/lib/pkgconfig && \
+    printf '%s\n' \
+        'prefix=/usr/local' \
+        'exec_prefix=${prefix}' \
+        'libdir=${exec_prefix}/lib' \
+        'includedir=${prefix}/include' \
+        '' \
+        'Name: sherpa-onnx' \
+        'Description: Sherpa-ONNX streaming speech recognition' \
+        'Version: 1.12.39' \
+        'Libs: -L${libdir} -lsherpa-onnx-c-api -lsherpa-onnx-cxx-api -lonnxruntime' \
+        'Cflags: -I${includedir}' \
+        > /usr/local/lib/pkgconfig/sherpa-onnx.pc
+
+# Python test dependencies.
+RUN pip3 install --break-system-packages \
+    vpp-papi scapy pytest pytest-timeout pytest-xdist piper-tts
+
+# TTS + resampling CLI for roundtrip test.
+# ffmpeg binary is separate from libavcodec-dev already installed above;
+# shared libs are already present so this adds only the ffmpeg executable.
+RUN apt-get update && apt-get install -y --no-install-recommends espeak-ng ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src

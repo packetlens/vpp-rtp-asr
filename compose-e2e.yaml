@@ -1,0 +1,145 @@
+# Docker Compose — live-call e2e test for vpp-rtp-asr
+#
+# Architecture (3-container data path, matching baresip-call lab design):
+#
+#   caller-net (10.66.21.0/24)           sink-net (10.66.23.0/24)
+#
+#   [caller]──────────────────►[vpp]──────────────────►[sink]
+#    ffmpeg RTP     host-eth0        host-eth1         nc -lu
+#    →10.66.23.20   10.66.21.10      10.66.23.10       :16400
+#    via VPP        rtp-asr: ON      rtp-asr: ON
+#                        │ JSON-UDP (mgmt-net)
+#                   [collector]
+#                   10.66.20.30:17879
+#
+# VPP acts as a ROUTER between caller-net and sink-net.  RTP packets are
+# transit traffic — rtp-asr-tap intercepts them as VPP forwards each packet.
+# The emitter sends JSON-UDP transcripts to the collector on a separate mgmt net.
+#
+# Usage:
+#   docker compose run --rm build               # build the plugin first
+#   docker compose -f compose-e2e.yaml up \
+#     --abort-on-container-exit \
+#     --exit-code-from collector
+
+networks:
+  caller-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.21.0/24
+
+  sink-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.23.0/24
+
+  mgmt:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.20.0/24
+
+volumes:
+  vpp-run: {}
+
+services:
+
+  # ── VPP: L3 router with rtp-asr-tap on both sides ───────────────────────────
+  vpp:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    privileged: true
+    cap_add: [NET_ADMIN, NET_RAW]
+    networks:
+      caller-net:
+        ipv4_address: 10.66.21.10   # VPP data-plane, caller side
+      sink-net:
+        ipv4_address: 10.66.23.10   # VPP data-plane, sink side
+      mgmt:
+        ipv4_address: 10.66.20.10   # kernel stack; emitter UDP goes out here
+    volumes:
+      - .:/src
+      - vpp-run:/run/vpp
+      - ./models:/models:ro
+    environment:
+      - VPP_RTP_ASR_MODEL_DIR=/models/sherpa-onnx-moonshine-tiny-en-int8
+      - VPP_RTP_ASR_EMITTER_JSON_UDP=10.66.20.30:17879
+    command: [bash, /src/scripts/e2e-vpp-start.sh]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "test -f /tmp/vpp-interfaces-ready && vppctl -s /run/vpp/cli.sock show rtp-asr stats | grep -q 'sherpa loaded:.*yes'"
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 5s
+
+  # ── Silent RTP sink (receives forwarded audio, discards it) ──────────────────
+  sink:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    cap_add: [NET_ADMIN]
+    networks:
+      sink-net:
+        ipv4_address: 10.66.23.20
+    depends_on:
+      vpp:
+        condition: service_healthy
+    # Add route to caller-net via VPP's sink-side IP, then count RTP packets
+    volumes:
+      - .:/src
+    command:
+      - bash
+      - -c
+      - |
+        ip route add 10.66.21.0/24 via 10.66.23.10 2>/dev/null || true
+        exec python3 /src/scripts/e2e-sink.py
+
+  # ── Piper TTS → ffmpeg RTP sender ────────────────────────────────────────────
+  caller:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    cap_add: [NET_ADMIN]
+    networks:
+      caller-net:
+        ipv4_address: 10.66.21.20
+    volumes:
+      - .:/src
+      - ./models:/models:ro
+    environment:
+      - PIPER_MODEL=/models/piper/en_US-lessac-medium.onnx
+      - VPP_RTP_HOST=10.66.23.20   # send to the sink (through VPP as router)
+      - VPP_RTP_PORT=16400
+      - LOOPS=6
+    depends_on:
+      vpp:
+        condition: service_healthy
+      sink:
+        condition: service_started
+    # Add route to sink-net via VPP's caller-side IP, then synthesize and send
+    command:
+      - bash
+      - -c
+      - |
+        ip route add 10.66.23.0/24 via 10.66.21.10 2>/dev/null || true
+        exec bash /src/scripts/e2e-caller.sh
+
+  # ── JSON-UDP transcript collector + validator ─────────────────────────────────
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    networks:
+      mgmt:
+        ipv4_address: 10.66.20.30
+    volumes:
+      - .:/src
+    depends_on:
+      vpp:
+        condition: service_healthy
+    command: [python3, /src/scripts/e2e-collector.py]

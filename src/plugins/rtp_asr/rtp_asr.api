@@ -1,0 +1,73 @@
+/*
+ * rtp_asr.api - VPP RTP-ASR plugin binary API definitions
+ *
+ * Copyright (c) 2026 PacketFlow (packetflow.dev)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+option version = "0.1.0";
+
+import "vnet/interface_types.api";
+
+/** \brief Enable or disable RTP-ASR observation on an interface */
+autoreply define rtp_asr_interface_enable_disable {
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  bool enable_disable;
+};
+
+/** \brief Set plugin-wide configuration (model, VAD, emitter sink) */
+autoreply define rtp_asr_config_set {
+  u32 client_index;
+  u32 context;
+  string model_path[256];
+  u8 model_variant;        /* 0=base, 1=small-streaming, 2=medium-streaming */
+  u8 vad_kind;             /* 0=silero, 1=webrtc, 2=off */
+  u8 emitter_sink;         /* 0=syslog, 1=json-udp, 2=grpc */
+  string emitter_target[256];
+  u32 worker_count;        /* 0 = auto */
+};
+
+/** \brief Query plugin-wide statistics */
+define rtp_asr_stats_get {
+  u32 client_index;
+  u32 context;
+};
+
+define rtp_asr_stats_get_reply {
+  u32 context;
+  i32 retval;
+  u64 packets;
+  u64 bytes;
+  u64 new_sessions;
+  u64 expired_sessions;
+  u64 malformed_rtp;
+  u64 ring_full_drops;
+  u64 transcripts_emitted;
+  u64 inference_calls;
+  u64 inference_latency_ms_sum;
+};
+
+/** \brief Dump list of active RTP sessions (streaming reply) */
+define rtp_asr_session_dump {
+  u32 client_index;
+  u32 context;
+};
+
+define rtp_asr_session_details {
+  u32 context;
+  u32 ssrc;
+  u8  payload_type;
+  u32 clock_rate;
+  u64 packets;
+  u64 bytes;
+  f64 age_seconds;
+};
+
+/** \brief Subscribe to live transcript stream (optional, alternative to JSON-UDP / gRPC emitter) */
+autoreply define rtp_asr_transcripts_subscribe {
+  u32 client_index;
+  u32 context;
+  bool enable;
+};

@@ -1,0 +1,32 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/src
+    working_dir: /src
+    privileged: true
+    stdin_open: true
+    tty: true
+    stop_grace_period: 2s
+    command: /bin/bash
+
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/src
+    working_dir: /src
+    command: /src/scripts/build-plugin.sh
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/src
+    working_dir: /src
+    privileged: true
+    command: /src/scripts/build-plugin.sh --test
