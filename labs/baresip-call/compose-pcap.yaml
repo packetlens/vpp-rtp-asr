@@ -1,0 +1,102 @@
+# Docker Compose — pcap-replay test for vpp-rtp-asr
+#
+# Sends a pre-built G.711 µ-law RTP stream (generated from the Moonshine
+# test WAV) as real UDP packets through the Docker bridge → VPP host-interface
+# → rtp-asr tap → Moonshine ASR → collector validation.
+#
+# No SIP / no baresip needed: rtp-asr intercepts any RTP arriving on the
+# enabled interface regardless of call state.
+#
+# Usage:
+#   docker compose run --rm build                        # build plugin (once)
+#   docker compose -f labs/baresip-call/compose-pcap.yaml up \
+#       --abort-on-container-exit --exit-code-from collector
+#
+# Architecture:
+#   [pcap-caller]──UDP──►[vpp host-if caller-net]──rtp-asr──►[collector]
+#   10.66.22.20          10.66.22.10 (10.66.22.0/24)          10.66.20.30:17879
+
+networks:
+  caller-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.22.0/24
+
+  mgmt-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.20.0/24
+
+volumes:
+  vpp-run: {}
+
+services:
+
+  # ── VPP: rtp-asr tap on the caller-side interface only ───────────────────────
+  vpp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.dev
+    privileged: true
+    cap_add: [NET_ADMIN, NET_RAW]
+    networks:
+      caller-net:
+        ipv4_address: 10.66.22.10
+      mgmt-net:
+        ipv4_address: 10.66.20.10
+    volumes:
+      - ../..:/src
+      - vpp-run:/run/vpp
+      - ../../models:/models:ro
+    environment:
+      - VPP_RTP_ASR_MODEL_DIR=/models/sherpa-onnx-moonshine-tiny-en-int8
+      - VPP_RTP_ASR_EMITTER_JSON_UDP=10.66.20.30:17879
+    command: [bash, /src/labs/baresip-call/scripts/vpp-pcap-start.sh]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "vppctl -s /run/vpp/cli.sock show rtp-asr stats | grep -q 'sherpa loaded:.*yes'"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 25s
+
+  # ── RTP sender: generates pcap from WAV, sends via UDP ───────────────────────
+  pcap-caller:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.dev
+    networks:
+      caller-net:
+        ipv4_address: 10.66.22.20
+    volumes:
+      - ../..:/src:ro
+      - ../../models:/models:ro
+    depends_on:
+      vpp:
+        condition: service_healthy
+    environment:
+      - VPP_IP=10.66.22.10
+      - VPP_PORT=16400
+      - REPEATS=4
+    command: [python3, /src/labs/baresip-call/scripts/pcap-replay-caller.py]
+
+  # ── Transcript collector ─────────────────────────────────────────────────────
+  collector:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.dev
+    networks:
+      mgmt-net:
+        ipv4_address: 10.66.20.30
+    volumes:
+      - ../..:/src
+    depends_on:
+      vpp:
+        condition: service_healthy
+    environment:
+      - EXPECTED_WORDS_CSV=thoughts,affected,hester,hope,apprehension
+      - MIN_WORD_HITS=4
+    command: [python3, /src/scripts/e2e-collector.py]

@@ -1,0 +1,16 @@
+# CI image: copies plugin source, builds it against installed VPP + Sherpa-ONNX.
+ARG BASE_IMAGE=vpp-rtp-asr-dev:base
+FROM ${BASE_IMAGE}
+
+COPY src/ /src/src/
+COPY CMakeLists.txt /src/
+
+WORKDIR /src/build
+RUN cmake -G Ninja .. && ninja -j"$(nproc)"
+
+COPY test/ /src/test/
+COPY scripts/ /src/scripts/
+COPY labs/ /src/labs/
+COPY models/ /src/models/
+
+WORKDIR /src

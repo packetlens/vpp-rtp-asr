@@ -1,0 +1,9 @@
+# Dev image: VPP + Sherpa-ONNX + FFmpeg + Opus pre-installed from base image.
+# Plugin source is mounted at /src and built out-of-tree.
+#
+# Run:  docker compose run --rm dev
+
+ARG BASE_IMAGE=vpp-rtp-asr-dev:base
+FROM ${BASE_IMAGE}
+
+WORKDIR /src
